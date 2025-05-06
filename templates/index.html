@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bulk Email Sender</title>
+  <!-- Bootstrap CSS -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <!-- Quill Editor CSS -->
+  <link href="https://cdn.quilljs.com/1.3.6/quill.snow.css" rel="stylesheet">
+  <!-- Bootstrap Icons -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+  <style>
+      body { background-color: #f8f9fa; padding-top: 70px; }
+      .container { margin-top: 20px; margin-bottom: 40px; }
+      .card { margin-bottom: 25px; }
+      .editor-container { height: 300px; background-color: #fff; }
+      #preview-container { display: none; border: 1px solid #dee2e6; padding: 15px; background-color: #fff; max-height: 450px; overflow-y: auto; }
+      #loading-indicator { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 1050; background-color: rgba(255, 255, 255, 0.8); padding: 20px; border-radius: 5px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); align-items: center; }
+      .nav-tabs .nav-link { color: #495057; }
+      .nav-tabs .nav-link.active { color: #0d6efd; border-color: #dee2e6 #dee2e6 #fff; }
+      .navbar { border-bottom: 1px solid #e9ecef; }
+      .card-header { background-color: #f8f9fa; border-bottom: 1px solid #dee2e6; }
+      #navbar-status { font-size: 0.9em; display: flex; align-items: center; }
+      .instance-btn {
+  margin-bottom: 0.5rem;
+  padding: 0.6rem 1rem;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.instance-btn:hover,
+.instance-btn:focus {
+  text-decoration: none;
+  /* these come “for free” from btn-outline-* */
+}
+
+  </style>
+</head>
+<body>
+
+<nav class="navbar navbar-expand-lg navbar-light bg-white fixed-top shadow-sm">
+  <div class="container-fluid">
+    <a class="navbar-brand fw-bold text-primary" href="{{ url_for('index') }}">
+        <i class="bi bi-envelope-arrow-up-fill me-2"></i>Bulk Mailer WebUI
+    </a>
+    <span class="navbar-text ms-auto" id="navbar-status">
+        <i class="bi bi-info-circle me-1"></i>Ready
+    </span>
+  </div>
+</nav>
+
+<div class="container">
+
+  <!-- Active Sending panel -->
+  {% if active_tasks and active_tasks|length > 0 %}
+  <div class="mb-4">
+    <button class="btn btn-warning" type="button" data-bs-toggle="collapse" data-bs-target="#activeTasksPanel" aria-expanded="false">
+      <i class="bi bi-envelope-open-text me-1"></i> View Sending Mail ({{ active_tasks|length }})
+    </button>
+    <div class="collapse mt-2" id="activeTasksPanel">
+      <div class="card card-body p-2">
+        <ul class="list-group list-group-flush">
+          {% for task in active_tasks %}
+          <li class="list-group-item">
+            <a href="{{ url_for('result', task_id=task.id) }}"
+               class="btn btn-outline-primary w-100 text-start instance-btn">
+              Instance {{ loop.index }} — Pending: {{ task.pending }} / {{ task.total }}
+            </a>
+          </li>
+          {% endfor %}
+        </ul>
+        
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Sent Emails panel -->
+  {% if sent_tasks and sent_tasks|length > 0 %}
+  <div class="mb-4">
+    <button class="btn btn-success" type="button" data-bs-toggle="collapse" data-bs-target="#sentTasksPanel" aria-expanded="false">
+      <i class="bi bi-envelope-check-fill me-1"></i> Sent Emails ({{ sent_tasks|length }})
+    </button>
+    <div class="collapse mt-2" id="sentTasksPanel">
+      <div class="card card-body p-2">
+        <ul class="list-group list-group-flush">
+          {% set offset = active_tasks|length %}
+          {% for task in sent_tasks %}
+          <li class="list-group-item">
+            <a href="{{ url_for('result', task_id=task.id) }}"
+               class="btn btn-outline-success w-100 text-start instance-btn">
+               Instance {{ offset + loop.index }} — Sent: {{ task.sent }} / {{ task.total }}
+            </a>
+          </li>
+          {% endfor %}
+        </ul>
+        
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <h2 class="text-center my-4">Compose and Send Emails</h2>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, message in messages %}
+        {% set alert_class = 'alert-info' %}
+        {% if category in ['error','danger'] %}{% set alert_class = 'alert-danger' %}
+        {% elif category == 'success' %}{% set alert_class = 'alert-success' %}
+        {% elif category == 'warning' %}{% set alert_class = 'alert-warning' %}{% endif %}
+        <div class="alert {{ alert_class }} alert-dismissible fade show d-flex align-items-center" role="alert">
+           {% if category in ['error','danger'] %}
+             <i class="bi bi-x-octagon-fill me-2"></i>
+           {% elif category == 'success' %}
+             <i class="bi bi-check-circle-fill me-2"></i>
+           {% elif category == 'warning' %}
+             <i class="bi bi-exclamation-triangle-fill me-2"></i>
+           {% else %}
+             <i class="bi bi-info-circle-fill me-2"></i>
+           {% endif %}
+           <div>{{ message }}</div>
+          <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  <form method="POST" enctype="multipart/form-data" id="email-form">
+    <div class="row g-4">
+      <!-- Left Column: Form Inputs -->
+      <div class="col-lg-6">
+
+        <!-- Card: Email Content -->
+        <div class="card shadow-sm">
+          <div class="card-header">
+            <i class="bi bi-pencil-square me-2"></i><strong>Email Content</strong>
+          </div>
+          <div class="card-body">
+            <div class="mb-3">
+              <label class="form-label fw-bold">1. Choose Content Source:</label>
+              <div>
+                <div class="form-check form-check-inline">
+                  <input class="form-check-input" type="radio" name="template_source" id="sourceDraft" value="draft" checked>
+                  <label class="form-check-label" for="sourceDraft">Draft Email Below</label>
+                </div>
+                <div class="form-check form-check-inline">
+                  <input class="form-check-input" type="radio" name="template_source" id="sourceUpload" value="upload">
+                  <label class="form-check-label" for="sourceUpload">Upload Template File</label>
+                </div>
+                <div class="form-check form-check-inline">
+                  <input class="form-check-input" type="radio" name="template_source" id="sourceKaren" value="karen_inv">
+                  <label class="form-check-label" for="sourceKaren">Karen Inv</label>
+                </div>
+              </div>
+            </div>
+
+            <div class="mb-3" id="uploadSection" style="display: none;">
+              <label for="template_file" class="form-label">Upload Template (HTML, MD, TXT):</label>
+              <input type="file" name="template_file" id="template_file" class="form-control" accept=".html,.htm,.md,.txt">
+            </div>
+
+            <div id="draftSection">
+              <label class="form-label">Draft Content:</label>
+              <ul class="nav nav-tabs mb-2" id="editorTabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                  <button class="nav-link active" id="rich-tab" data-bs-toggle="tab" data-bs-target="#rich" type="button">Rich Text Editor</button>
+                </li>
+                <li class="nav-item" role="presentation">
+                  <button class="nav-link" id="html-tab" data-bs-toggle="tab" data-bs-target="#html" type="button">HTML Source</button>
+                </li>
+              </ul>
+              <div class="tab-content" id="editorTabsContent">
+                <div class="tab-pane fade show active" id="rich">
+                  <div id="quillEditor" class="editor-container border rounded"></div>
+                </div>
+                <div class="tab-pane fade" id="html">
+                  <textarea id="htmlSource" class="form-control" style="height:300px;"></textarea>
+                </div>
+              </div>
+              <textarea name="email_content" id="email_content" style="display:none;"></textarea>
+              <div id="karenSection" style="display:none; margin-top:1rem;">
+                <div class="alert alert-secondary d-flex align-items-center">
+                  <i class="bi bi-file-earmark-text-fill me-2"></i>
+                  <div><strong>KAREN INV template loaded.</strong></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card: Send Options -->
+        <div class="card shadow-sm">
+          <div class="card-header">
+            <i class="bi bi-gear-fill me-2"></i><strong>Send Options</strong>
+          </div>
+          <div class="card-body">
+            <div class="mb-3">
+              <label for="custom_display_name" class="form-label fw-bold">Sender Display Name (Optional):</label>
+              <input type="text" name="custom_display_name" id="custom_display_name" class="form-control" placeholder="e.g., Your Company Name">
+              <div class="form-text">If left blank, the default name from settings (<code>.env</code>) will be used.</div>
+            </div>
+
+            <div class="mb-3">
+              <label for="subject" class="form-label fw-bold">Email Subject:</label>
+              <input type="text" name="subject" id="subject" class="form-control" placeholder="Enter subject (use $header) or leave blank">
+              <div class="form-text">Placeholders like <code>$name</code> or <code>${email}</code> can be used.</div>
+            </div>
+
+            <div class="mb-3">
+              <label class="form-label fw-bold">Recipient Method:</label>
+              <div>
+                <div class="form-check form-check-inline">
+                  <input class="form-check-input" type="radio" name="send_method" id="bulk" value="bulk" checked>
+                  <label class="form-check-label" for="bulk">Bulk (Upload CSV)</label>
+                </div>
+                <div class="form-check form-check-inline">
+                  <input class="form-check-input" type="radio" name="send_method" id="manual" value="manual">
+                  <label class="form-check-label" for="manual">Single Recipient</label>
+                </div>
+              </div>
+            </div>
+
+            <div class="mb-3" id="csvDiv">
+              <label for="csv_file" class="form-label">Upload CSV File:</label>
+              <input type="file" name="csv_file" id="csv_file" class="form-control" accept=".csv">
+              <div class="form-text">Must contain an 'EMAIL' header (case-insensitive).</div>
+            </div>
+
+            <div class="mb-3" id="manualDiv" style="display: none;">
+              <label for="manual_email" class="form-label">Recipient Email Address:</label>
+              <input type="email" name="manual_email" id="manual_email" class="form-control" placeholder="Enter recipient email">
+            </div>
+
+            <div class="mb-3">
+              <label for="attachments" class="form-label fw-bold">Attachments (optional):</label>
+              <input type="file" name="attachments" id="attachments" class="form-control" multiple>
+            </div>
+
+            <div class="d-flex justify-content-between align-items-center mt-4 pt-3 border-top">
+              <button type="button" class="btn btn-outline-secondary" id="preview-btn">
+                <i class="bi bi-eye me-1"></i>Preview
+              </button>
+              <button type="submit" class="btn btn-primary btn-lg">
+                <i class="bi bi-send-fill me-1"></i>Send Email(s)
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column: Live Preview -->
+      <div class="col-lg-6">
+        <div class="card shadow-sm sticky-lg-top" style="top: 85px;">
+          <div class="card-header">
+            <i class="bi bi-display me-2"></i><strong>Email Preview</strong>
+          </div>
+          <div class="card-body">
+            <div id="preview-instructions" class="text-muted text-center py-5">
+              Click "Preview" after drafting or uploading content.
+            </div>
+            <div id="preview-container">
+              <div class="alert alert-warning small d-flex align-items-center" role="alert">
+                <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                <div>Placeholders ($name etc.) are not replaced in preview. Attachments not shown.</div>
+              </div>
+              <hr>
+              <div id="preview-content"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </form>
+</div>
+
+<!-- Bootstrap JS Bundle -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<!-- Quill JS -->
+<script src="https://cdn.quilljs.com/1.3.6/quill.js"></script>
+<!-- Marked.js for Markdown conversion -->
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+<script>
+  var quill = new Quill('#quillEditor', {
+    modules: {
+      toolbar: [
+        [{ 'header': [1, 2, 3, false] }],
+        ['bold', 'italic', 'underline', 'strike'],
+        [{ 'list': 'ordered' }, { 'list': 'bullet' }],
+        [{ 'align': [] }],
+        ['link', 'image'],
+        ['clean']
+      ]
+    },
+    placeholder: 'Compose your email here...',
+    theme: 'snow'
+  });
+
+  const quillEditor = document.getElementById('quillEditor').querySelector('.ql-editor');
+  const htmlSource = document.getElementById('htmlSource');
+
+  quill.on('text-change', (delta, oldDelta, source) => {
+    if (source === 'user') {
+      htmlSource.value = quill.root.innerHTML;
+    }
+  });
+  htmlSource.addEventListener('input', () => {
+    quill.clipboard.dangerouslyPasteHTML(htmlSource.value);
+  });
+  document.getElementById('html-tab').addEventListener('show.bs.tab', () => {
+    htmlSource.value = quill.root.innerHTML;
+  });
+
+  function prepareEmailContentForSubmit() {
+    const templateSource = document.querySelector('input[name="template_source"]:checked').value;
+    if (templateSource === 'draft') {
+      const activeTabId = document.querySelector('#editorTabs .nav-link.active').id;
+      document.getElementById("email_content").value = (activeTabId === "rich-tab")
+        ? quill.root.innerHTML
+        : htmlSource.value;
+    } else if (templateSource === 'karen_inv') {
+      document.getElementById("email_content").value = window.karenTemplate || '';
+    } else {
+      document.getElementById("email_content").value = "";
+    }
+  }
+
+  const emailForm = document.getElementById('email-form');
+  const loadingIndicator = document.getElementById('loading-indicator');
+  const navbarStatus = document.getElementById('navbar-status');
+
+  emailForm.addEventListener('submit', (event) => {
+    prepareEmailContentForSubmit();
+    navbarStatus.innerHTML = `
+      <div class="spinner-border spinner-border-sm text-secondary me-2" role="status">
+          <span class="visually-hidden">Loading...</span>
+      </div>Processing...`;
+    loadingIndicator.style.display = 'flex';
+  });
+
+  document.getElementById("preview-btn").addEventListener("click", () => {
+    const templateSource = document.querySelector('input[name="template_source"]:checked').value;
+    let content = "";
+    const previewContentEl = document.getElementById("preview-content");
+    const previewContainerEl = document.getElementById("preview-container");
+    const previewInstructionsEl = document.getElementById("preview-instructions");
+
+    const displayPreview = (htmlContent) => {
+      previewContentEl.innerHTML = htmlContent;
+      previewContainerEl.style.display = "block";
+      previewInstructionsEl.style.display = "none";
+    };
+
+    const escapeHtml = (unsafe) => unsafe.replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/\"/g, "&quot;").replace(/'/g, "&#039;");
+
+    const parseMd = (mdContent) => {
+      try {
+        marked.setOptions({ breaks: true });
+        return marked.parse(mdContent);
+      } catch (err) {
+        console.error("Markdown parsing error:", err);
+        return '<pre>' + escapeHtml(mdContent) + '</pre>';
+      }
+    };
+
+    if (templateSource === "upload") {
+      const fileInput = document.getElementById("template_file");
+      if (!fileInput.files.length) { alert("Please select a template file to preview."); return; }
+      const file = fileInput.files[0];
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        content = e.target.result;
+        if (file.name.toLowerCase().endsWith('.md') || (!/<\/?[a-z][\s\S]*>/i.test(content.substring(0, 1000)))) {
+          content = parseMd(content);
+        }
+        displayPreview(content);
+      };
+      reader.onerror = () => alert("Error reading the template file.");
+      reader.readAsText(file);
+    } else if (templateSource === "karen_inv") {
+      displayPreview(window.karenTemplate || '<em>Loading template...</em>');
+    } else {
+      const activeTabId = document.querySelector('#editorTabs .nav-link.active').id;
+      content = (activeTabId === "rich-tab") ? quill.root.innerHTML : htmlSource.value;
+      if (activeTabId === "html-tab" && !/<\/?[a-z][\s\S]*>/i.test(content.substring(0, 1000))) {
+        content = parseMd(content);
+      }
+      if (!content.trim()) { alert("Draft is empty. Please write some content to preview."); return; }
+      displayPreview(content);
+    }
+  });
+
+  const bulkRadio = document.getElementById("bulk");
+  const manualRadio = document.getElementById("manual");
+  const csvDiv = document.getElementById("csvDiv");
+  const manualDiv = document.getElementById("manualDiv");
+  const sourceUpload = document.getElementById("sourceUpload");
+  const sourceDraft = document.getElementById("sourceDraft");
+  const sourceKaren = document.getElementById("sourceKaren");
+
+  const toggleSendMethod = () => {
+    const isManual = manualRadio.checked;
+    manualDiv.style.display = isManual ? "block" : "none";
+    csvDiv.style.display = isManual ? "none" : "block";
+  };
+
+  const toggleContentSource = () => {
+    const isUpload = sourceUpload.checked;
+    const isKaren = sourceKaren.checked;
+    document.getElementById("uploadSection").style.display = isUpload ? "block" : "none";
+    document.getElementById("draftSection").style.display = (isUpload || isKaren) ? "none" : "block";
+    document.getElementById("karenSection").style.display = isKaren ? "block" : "none";
+    if (isKaren && !window.karenTemplate) {
+      fetch('/static/format.html')
+        .then(res => res.text())
+        .then(html => { window.karenTemplate = html; })
+        .catch(err => console.error('Failed to load KAREN INV template:', err));
+    }
+  };
+
+  document.addEventListener("DOMContentLoaded", () => {
+    toggleSendMethod();
+    toggleContentSource();
+    bulkRadio.addEventListener("change", toggleSendMethod);
+    manualRadio.addEventListener("change", toggleSendMethod);
+    sourceUpload.addEventListener("change", toggleContentSource);
+    sourceDraft.addEventListener("change", toggleContentSource);
+    sourceKaren.addEventListener("change", toggleContentSource);
+    navbarStatus.innerHTML = '<i class="bi bi-info-circle me-1"></i>Ready';
+    loadingIndicator.style.display = 'none';
+  });
+</script>
+</body>
+</html>

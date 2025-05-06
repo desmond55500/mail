@@ -1,0 +1,20 @@
+import pandas as pd
+
+# Create DataFrame with the email addresses
+emails = [
+    'timilehinrr4@gmail.com',
+    'aliciawoods56066@gmail.com',
+    'charles444500@gmail.com',
+    'jamesmith56066@gmail.com'
+]
+df = pd.DataFrame({'email': emails})
+
+# Save to CSV
+file_path = '/mnt/data/emails.csv'
+df.to_csv(file_path, index=False)
+
+# Display the DataFrame to the user
+import ace_tools as tools; tools.display_dataframe_to_user(name='Email List', dataframe=df)
+
+# Output the path for download
+file_path

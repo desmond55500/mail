@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bulk Email Sender - Result</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Bootstrap Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <style>
+        body { background-color: #f8f9fa; padding-top: 70px; }
+        .container { margin-top: 20px; margin-bottom: 40px; }
+        .log-item { font-family: 'Courier New', Courier, monospace; font-size: 0.9em; padding: 0.6rem 1rem; border-bottom: 1px solid #eee; display: flex; align-items: center; }
+        .log-item:last-child { border-bottom: none; }
+        .log-item.success { color: #198754; }
+        .log-item.failed  { color: #dc3545; }
+        .log-item.info    { color: #6c757d; }
+        .log-item i { margin-right: 10px; font-size: 1.1em; }
+        .navbar { border-bottom: 1px solid #e9ecef; }
+        .card-header { background-color: #f8f9fa; border-bottom: 1px solid #dee2e6; }
+        #navbar-status { font-size: 0.9em; display: flex; align-items: center; }
+        .back-btn { margin-right: 1rem; }
+        .close-btn { margin-right: 1rem; }
+    </style>
+</head>
+<body>
+
+<nav class="navbar navbar-expand-lg navbar-light bg-white fixed-top shadow-sm">
+  <div class="container-fluid">
+     <a class="navbar-brand fw-bold text-primary" href="{{ url_for('index') }}">
+        <i class="bi bi-envelope-arrow-up-fill me-2"></i>Bulk Mailer WebUI
+     </a>
+    <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm back-btn">
+      <i class="bi bi-arrow-left-circle me-1"></i>Back to Compose
+    </a>
+    <!-- Close Instance button: only show for finished (sent-tasks) -->
+    {% if task.finished %}
+    <form id="close-btn-form" method="post" action="{{ url_for('close_task', task_id=task_id) }}" class="d-inline">
+      <button type="submit" class="btn btn-outline-danger btn-sm close-btn">
+        <i class="bi bi-x-circle me-1"></i>Close Instance
+      </button>
+    </form>
+    {% endif %}
+    <span class="navbar-text ms-auto" id="navbar-status">
+        {{ navbar_status_html | safe }}
+    </span>
+  </div>
+</nav>
+
+<div class="container">
+    <h2 class="text-center my-4">Email Sending Results</h2>
+
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          {% set alert_class = 'alert-info' %}
+          {% if category in ['error','danger'] %}{% set alert_class = 'alert-danger' %}
+          {% elif category == 'success' %}{% set alert_class = 'alert-success' %}
+          {% elif category == 'warning' %}{% set alert_class = 'alert-warning' %}{% endif %}
+          <div class="alert {{ alert_class }} alert-dismissible fade show d-flex align-items-center" role="alert">
+            {% if category in ['error','danger'] %}<i class="bi bi-x-octagon-fill me-2"></i>
+            {% elif category == 'success' %}<i class="bi bi-check-circle-fill me-2"></i>
+            {% elif category == 'warning' %}<i class="bi bi-exclamation-triangle-fill me-2"></i>
+            {% else %}<i class="bi bi-info-circle-fill me-2"></i>{% endif %}
+            <div>{{ message }}</div>
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="card shadow-sm">
+        <div class="card-header">
+             <i class="bi bi-terminal me-2"></i><strong>Detailed Execution Log</strong>
+        </div>
+        <ul id="detailed-log" class="list-group list-group-flush">
+            {% if log_messages %}
+                {% for log in log_messages %}
+                    {% set log_class = 'info' %}
+                    {% set log_icon  = 'bi-info-circle' %}
+                    {% if log.startswith('SUCCESS:') %}{% set log_class = 'success' %}{% set log_icon = 'bi-check-circle-fill' %}
+                    {% elif log.startswith('FAILED:')  %}{% set log_class = 'failed'  %}{% set log_icon = 'bi-x-octagon-fill' %}
+                    {% elif log.startswith('Skipping') %}{% set log_icon  = 'bi-skip-forward-fill' %}
+                    {% elif log.startswith('Error') or log.startswith('Warning') %}{% set log_class='failed' %}{% set log_icon='bi-exclamation-triangle-fill' %}{% endif %}
+                   <li class="list-group-item log-item {{ log_class }}">
+                      <i class="bi {{ log_icon }}"></i><span>{{ log }}</span>
+                   </li>
+               {% endfor %}
+           {% else %}
+               <li class="list-group-item text-muted d-flex align-items-center">
+                   <i class="bi bi-info-circle me-2"></i>No detailed log messages generated for this run.
+               </li>
+           {% endif %}
+       </ul>
+    </div>
+
+    <div class="text-center mt-4 pt-3">
+      <!-- Styled Footer Back Button -->
+      <a href="{{ url_for('index') }}" id="action-btn" class="btn btn-outline-primary btn-lg rounded-pill">
+         <i class="bi bi-arrow-left-circle-fill me-1"></i>Go Back &amp; Send More
+      </a>
+    </div>
+</div>
+
+<!-- Bootstrap JS Bundle -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    const taskId = "{{ task_id }}";
+    const pollInterval = 1500; // milliseconds
+    const actionBtn = document.getElementById('action-btn');
+    const originalBtnHtml = actionBtn.innerHTML;
+    function renderLogs(logs) {
+      const ul = document.querySelector('#detailed-log'); ul.innerHTML = '';
+      logs.forEach(line => {
+        const li = document.createElement('li'); li.classList.add('list-group-item','log-item');
+        const icon = document.createElement('i'); icon.classList.add('bi','me-2');
+        if (line.startsWith('SUCCESS:')) { li.classList.add('success'); icon.classList.add('bi-check-circle-fill'); }
+        else if (line.startsWith('FAILED:'))  { li.classList.add('failed');  icon.classList.add('bi-x-octagon-fill'); }
+        else { li.classList.add('info'); icon.classList.add('bi-info-circle'); }
+        li.appendChild(icon); li.appendChild(document.createTextNode(line)); ul.appendChild(li);
+      });
+    }
+    function renderStatus(sent, failed, pending, total, finished) {
+      const nav = document.querySelector('#navbar-status');
+      nav.innerHTML = `Sent: ${sent} | Failed: ${failed} | Pending: ${pending}/${total}`;
+      if (!finished) {
+        actionBtn.classList.add('disabled'); actionBtn.setAttribute('aria-disabled', 'true');
+        actionBtn.innerHTML = `<i class='bi bi-clock-fill me-1'></i>Sending in progress`;
+      } else {
+        actionBtn.classList.remove('disabled'); actionBtn.removeAttribute('aria-disabled');
+        actionBtn.innerHTML = originalBtnHtml;
+      }
+    }
+    async function poll() {
+      try {
+        const res  = await fetch(`/status/${taskId}`);
+        const data = await res.json();
+        renderLogs(data.logs); renderStatus(data.sent, data.failed, data.pending, data.total, data.finished);
+        if (!data.finished) setTimeout(poll, pollInterval);
+      } catch (err) {
+        console.error("Status poll failed", err);
+        setTimeout(poll, pollInterval);
+      }
+    }
+    document.addEventListener('DOMContentLoaded', poll);
+</script>
+</body>
+</html>

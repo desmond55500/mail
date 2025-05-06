@@ -1,0 +1,311 @@
+import os
+import re
+import csv
+import io
+import uuid
+import threading
+import smtplib
+import markdown
+import html2text
+import mysql.connector
+from mysql.connector import pooling
+from dotenv import load_dotenv
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
+from werkzeug.utils import secure_filename
+
+# Load environment variables
+load_dotenv()
+DEFAULT_DISPLAY_NAME = os.getenv('DISPLAY_NAME', 'Default Sender Name')
+SENDER_EMAIL       = os.getenv('SENDER_EMAIL')
+PASSWORD           = os.getenv('PASSWORD')
+
+# SMTP configuration
+MAILER_HOST = os.getenv('MAILER_HOST', 'mail.youngmoneyent.org')
+MAILER_PORT = int(os.getenv('MAILER_PORT', '587'))
+
+# MySQL Configuration and Connection Pool
+DB_CONFIG = {
+    'host':     os.getenv('DB_HOST', 'localhost'),
+    'port':     int(os.getenv('DB_PORT', '3306')),
+    'user':     os.getenv('DB_USER', 'root'),
+    'password': os.getenv('DB_PASS', ''),
+    'database': os.getenv('DB_NAME', 'mail'),
+}
+cnxpool = pooling.MySQLConnectionPool(
+    pool_name            = 'bulk_mail_pool',
+    pool_size            = 5,
+    pool_reset_session   = True,
+    **DB_CONFIG
+)
+
+# Flask app setup
+app = Flask(__name__)
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'a_default_but_less_secure_key')
+
+# Allowed file extensions
+def allowed_file(filename, allowed_extensions):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in allowed_extensions
+
+ALLOWED_EXTENSIONS_TEMPLATE = {'html', 'htm', 'md', 'txt'}
+ALLOWED_EXTENSIONS_CSV      = {'csv'}
+
+# CSV processing
+def process_csv_data(csv_content):
+    try:
+        csv_io = io.StringIO(csv_content)
+        if csv_io.getvalue().startswith('\ufeff'):
+            csv_io = io.StringIO(csv_content.lstrip('\ufeff'))
+        try:
+            dialect = csv.Sniffer().sniff(csv_io.read(2048))
+        except csv.Error:
+            dialect = csv.excel
+        csv_io.seek(0)
+        reader = csv.DictReader(csv_io, dialect=dialect)
+        if not reader.fieldnames:
+            return None, None
+        headers = [h.strip().lower() for h in reader.fieldnames if h]
+        csv_io.seek(0)
+        reader = csv.DictReader(csv_io, dialect=dialect)
+        reader.fieldnames = headers
+        rows = list(reader)
+        return rows, headers
+    except Exception:
+        return None, None
+
+# Message templating
+def generate_message(template, row, headers):
+    message = template
+    row_lower = {str(k).lower(): str(v) for k, v in row.items() if k is not None}
+    for header in headers:
+        value = row_lower.get(header, '')
+        esc = re.escape(header)
+        message = re.sub(rf'\${{{esc}}}|\${esc}', value, message, flags=re.IGNORECASE)
+    return message
+
+# Extract subject from HTML content
+def extract_subject_and_body(content):
+    pattern = r"<title[^>]*>(.*?)</title>"
+    match   = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
+    if match:
+        subj = match.group(1).strip()
+        content = re.sub(pattern, '', content, count=1, flags=re.IGNORECASE|re.DOTALL).strip()
+        content = re.sub(r"^\s*\n", '', content)
+        return subj, content
+    lines = content.splitlines()
+    subj = 'No Subject'
+    body_lines = []
+    for line in lines:
+        if line.strip() and not line.strip().startswith('<'):
+            subj = line.strip()
+            break
+        body_lines.append(line)
+    return subj, '\n'.join(lines[len(body_lines):]).strip()
+
+# Email sending
+def send_email(receiver, subject, html_message, attachments, display_name):
+    if not SENDER_EMAIL or not PASSWORD:
+        return False, 'Sender email or password not configured.'
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject
+    msg['From']    = f"{display_name} <{SENDER_EMAIL}>"
+    msg['To']      = receiver
+    try:
+        h = html2text.HTML2Text()
+        h.ignore_links = False
+        h.body_width   = 0
+        text = h.handle(html_message)
+    except:
+        text = 'Please view in an HTML-capable client.'
+    part1 = MIMEText(text, 'plain', 'utf-8')
+    part2 = MIMEText(html_message, 'html', 'utf-8')
+    msg.attach(part1)
+    msg.attach(part2)
+    if attachments:
+        for file in attachments:
+            if file and hasattr(file, 'filename') and file.filename:
+                fname = secure_filename(file.filename) or 'attachment'
+                file.seek(0)
+                data = file.read()
+                file.seek(0)
+                part = MIMEBase('application', 'octet-stream')
+                part.set_payload(data)
+                encoders.encode_base64(part)
+                part.add_header('Content-Disposition', f'attachment; filename="{fname}"')
+                msg.attach(part)
+    try:
+        with smtplib.SMTP(host=MAILER_HOST, port=MAILER_PORT, timeout=30) as server:
+            server.ehlo()
+            if MAILER_PORT != 465:
+                server.starttls()
+                server.ehlo()
+            server.login(SENDER_EMAIL, PASSWORD)
+            server.sendmail(SENDER_EMAIL, receiver, msg.as_string())
+        return True, f'Email successfully sent to {receiver}'
+    except Exception as e:
+        return False, str(e)
+
+# Background task
+def send_emails_task(task_id, recipients_data, template, subject_tpl,
+                     is_md, is_txt, attachments, display_name):
+    md = markdown.Markdown(extensions=['extra', 'nl2br', 'smarty'])
+    for recipient in recipients_data:
+        receiver = recipient['email']
+        # Log "SENDING"
+        cnx = cnxpool.get_connection()
+        cur = cnx.cursor()
+        cur.execute("INSERT INTO log_entries (task_id,message) VALUES (%s,%s)",
+                    (task_id, f"SENDING: to {receiver}"))
+        cnx.commit()
+        cur.close(); cnx.close()
+
+        # Personalize & send
+        personalized = generate_message(template, recipient.get('data', {}), recipient.get('headers', []))
+        if subject_tpl:
+            subject = generate_message(subject_tpl, recipient.get('data', {}), recipient.get('headers', []))
+            body = personalized
+        else:
+            subject, body = extract_subject_and_body(personalized)
+            if subject == 'No Subject':
+                subject = f"{display_name} Information"
+        if is_md:
+            body_html = md.convert(body)
+        elif is_txt:
+            body_html = f"<pre style='white-space: pre-wrap;'>{body}</pre>"
+        else:
+            body_html = body
+        md.reset()
+
+        success, msg = send_email(receiver, subject, body_html, attachments, display_name)
+        # Update counts & log
+        cnx = cnxpool.get_connection()
+        cur = cnx.cursor()
+        if success:
+            cur.execute("UPDATE tasks SET sent = sent + 1 WHERE id = %s", (task_id,))
+            entry = f"SUCCESS: {msg}"
+        else:
+            cur.execute("UPDATE tasks SET failed = failed + 1 WHERE id = %s", (task_id,))
+            entry = f"FAILED: {msg}"
+        # Recalc pending
+        cur.execute("UPDATE tasks SET pending = total - (sent + failed + skipped) WHERE id = %s", (task_id,))
+        cur.execute("INSERT INTO log_entries (task_id,message) VALUES (%s,%s)", (task_id, entry))
+        cnx.commit()
+        cur.close(); cnx.close()
+
+    # Mark finished
+    cnx = cnxpool.get_connection()
+    cur = cnx.cursor()
+    cur.execute("UPDATE tasks SET finished = 1 WHERE id = %s", (task_id,))
+    cnx.commit()
+    cur.close(); cnx.close()
+
+# Routes
+@app.route('/', methods=['GET'])
+def index():
+    return render_template('index.html')
+
+@app.route('/', methods=['POST'])
+def index_post():
+    # 1. Load template
+    template_source = request.form.get('template_source')
+    if template_source == 'upload':
+        template_file = request.files.get('template_file')
+        if template_file and allowed_file(template_file.filename, ALLOWED_EXTENSIONS_TEMPLATE):
+            template_content_raw = template_file.read().decode('utf-8')
+        else:
+            flash('Invalid template file.', 'error')
+            return redirect(url_for('index'))
+    elif template_source == 'draft':
+        template_content_raw = request.form.get('template_draft', '').strip()
+    else:
+        flash('No template source provided.', 'error')
+        return redirect(url_for('index'))
+    # 2. Subject & display name
+    user_subject_template = request.form.get('subject', '').strip()
+    custom_name = request.form.get('custom_display_name', '').strip()
+    display_name = custom_name or DEFAULT_DISPLAY_NAME
+
+    # Determine template type
+    template_type = request.form.get('template_type', '').strip().lower()
+    is_markdown = template_type == 'markdown'
+    is_plain_text = template_type == 'plain_text'
+    # 3. Attachments
+    attachments = request.files.getlist('attachments')
+    # 4. Recipients (bulk vs manual)
+    recipients_data = []
+    skipped_count = 0
+    if request.form.get('send_method') == 'bulk':
+        # ... parse CSV, process_csv_data, build recipients_data list of dicts ...
+        pass  # integrate your CSV parsing here
+    else:
+        manual_email = request.form.get('manual_email','').strip()
+        recipients_data.append({'email': manual_email, 'data': {}, 'headers': []})
+    total = len(recipients_data)
+    # 5. Create task in DB
+    task_id = uuid.uuid4().hex
+    cnx = cnxpool.get_connection()
+    cur = cnx.cursor()
+    cur.execute(
+        "INSERT INTO tasks (id,total,skipped,pending) VALUES (%s,%s,%s,%s)",
+        (task_id, total, skipped_count, total)
+    )
+    cnx.commit()
+    cur.close(); cnx.close()
+    # 6. Launch background thread
+    threading.Thread(
+        target=send_emails_task,
+        args=(task_id, recipients_data, template_content_raw,
+              user_subject_template, is_markdown, is_plain_text,
+              attachments, display_name),
+        daemon=True
+    ).start()
+    return redirect(url_for('result', task_id=task_id))
+
+@app.route('/result/<task_id>')
+def result(task_id):
+    # Fetch task & initial logs
+    cnx = cnxpool.get_connection()
+    cur = cnx.cursor(dictionary=True)
+    cur.execute("SELECT * FROM tasks WHERE id=%s", (task_id,))
+    task = cur.fetchone()
+    if not task:
+        cur.close(); cnx.close()
+        return redirect(url_for('index'))
+    cur.execute("SELECT message FROM log_entries WHERE task_id=%s ORDER BY id", (task_id,))
+    logs = [r[0] for r in cur]
+    cur.close(); cnx.close()
+    return render_template('result.html',
+                           task_id=task_id,
+                           log_messages=logs,
+                           sent=task['sent'],
+                           failed=task['failed'],
+                           pending=task['pending'],
+                           total=task['total'],
+                           finished=bool(task['finished']))
+
+@app.route('/status/<task_id>')
+def status(task_id):
+    cnx = cnxpool.get_connection()
+    cur = cnx.cursor(dictionary=True)
+    cur.execute("SELECT sent,failed,pending,total,finished FROM tasks WHERE id=%s", (task_id,))
+    t = cur.fetchone()
+    if not t:
+        cur.close(); cnx.close()
+        return jsonify({'error':'unknown task'}), 404
+    cur.execute("SELECT message FROM log_entries WHERE task_id=%s ORDER BY id", (task_id,))
+    logs = [r[0] for r in cur]
+    cur.close(); cnx.close()
+    return jsonify({
+        'logs':     logs,
+        'sent':     t['sent'],
+        'failed':   t['failed'],
+        'pending':  t['pending'],
+        'total':    t['total'],
+        'finished': bool(t['finished'])
+    })
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=False)
